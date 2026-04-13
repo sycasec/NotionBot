@@ -1,24 +1,21 @@
-import json
 import logging
-import os
 import re
-import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 import zoneinfo
 
-import groq
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
-from langchain_core.messages.tool import ToolCall
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 from langchain_core.tools import BaseTool
-from langchain_core.utils.function_calling import convert_to_openai_tool
-from langchain_groq import ChatGroq
-from langchain_mcp_adapters.client import MultiServerMCPClient
-from langchain_ollama import ChatOllama
 
+from config import cfg
+from llm import create_llm, invoke_llm, load_tools
+from tool_utils import process_tool_calls
+from tools.date_tools import date_math
 from tools.finance_tools import get_stock_info
 from tools.notion_tools import add_content_to_page, create_notion_page, search_notion
+from tools.search_tools import web_search
+from tools.weather_tools import get_weather
 from user_state import get_history, get_timezone, save_message
 
 log = logging.getLogger(__name__)
@@ -27,9 +24,13 @@ _PROMPT_PATH = Path(__file__).parent / "system_prompt.md"
 _PROMPT_TEMPLATE = _PROMPT_PATH.read_text()
 
 
+# ---------------------------------------------------------------------------
+# System prompt
+# ---------------------------------------------------------------------------
+
 def _build_system_prompt(user_id: str = "") -> str:
-    parent_id = os.environ.get("NOTION_PARENT_PAGE_ID", "")
-    tz_name = get_timezone(user_id) if user_id else os.environ.get("TZ", "Asia/Manila")
+    parent_id = cfg.notion_parent_page_id
+    tz_name = get_timezone(user_id) if user_id else cfg.default_timezone
     tz = zoneinfo.ZoneInfo(tz_name)
     now = datetime.now(tz).strftime("%A, %B %d, %Y %I:%M %p")
     prompt = _PROMPT_TEMPLATE.replace("{{NOTION_PARENT_PAGE_ID}}", parent_id)
@@ -37,161 +38,105 @@ def _build_system_prompt(user_id: str = "") -> str:
     prompt = prompt.replace("{{TIMEZONE}}", tz_name)
     return prompt
 
+
+# ---------------------------------------------------------------------------
+# Tool registry
+# ---------------------------------------------------------------------------
+
 _tools: list[BaseTool] | None = None
 _tools_by_name: dict[str, BaseTool] | None = None
 _tool_defs: list[dict[str, Any]] | None = None
 
-
-def _make_mcp_client() -> MultiServerMCPClient:
-    return MultiServerMCPClient({
-        "notion": {
-            "command": "npx",
-            "args": ["-y", "@notionhq/notion-mcp-server"],
-            "env": {
-                "OPENAPI_MCP_HEADERS": json.dumps({
-                    "Authorization": f"Bearer {os.environ['NOTION_TOKEN']}",
-                    "Notion-Version": "2025-09-03",
-                })
-            },
-            "transport": "stdio",
-        }
-    })
-
-
-def _relax_array_item_types(obj: dict | list) -> None:
-    """Remove type constraints from array items so Groq accepts objects.
-
-    MCP tool schemas define fields like ``children`` as ``string[]``
-    (expecting JSON-encoded block strings), but LLMs naturally produce
-    objects.  Relaxing the schema lets Groq's server-side validation pass.
-    """
-    if isinstance(obj, dict):
-        if obj.get("type") == "array" and isinstance(obj.get("items"), dict):
-            obj["items"].pop("type", None)
-        for value in obj.values():
-            if isinstance(value, (dict, list)):
-                _relax_array_item_types(value)
-    elif isinstance(obj, list):
-        for item in obj:
-            if isinstance(item, (dict, list)):
-                _relax_array_item_types(item)
-
-
-# Notion ID fields that must be valid UUIDs with dashes.
-_UUID_FIELDS = {"page_id", "database_id", "data_source_id", "block_id"}
-_BARE_HEX_RE = re.compile(r"^[0-9a-f]{32}$")
-
-
-def _format_uuid(value: str) -> str:
-    """Insert dashes into a bare 32-char hex ID to make it a valid UUID."""
-    if _BARE_HEX_RE.match(value):
-        return str(uuid.UUID(value))
-    return value
-
-
-def _fix_args(args: dict) -> dict:
-    """Fix bare-hex UUIDs in tool arguments."""
-    result: dict[str, Any] = {}
-    for key, value in args.items():
-        if isinstance(value, dict):
-            result[key] = _fix_args(value)
-        elif isinstance(value, list):
-            result[key] = [
-                _fix_args(item) if isinstance(item, dict) else item
-                for item in value
-            ]
-        elif key in _UUID_FIELDS and isinstance(value, str):
-            result[key] = _format_uuid(value)
-        else:
-            result[key] = value
-    return result
-
-
-# Simple tools that work reliably with any LLM
-_SIMPLE_TOOLS = [create_notion_page, search_notion, add_content_to_page, get_stock_info]
+_SIMPLE_TOOLS = [
+    create_notion_page,
+    search_notion,
+    add_content_to_page,
+    get_stock_info,
+    get_weather,
+    web_search,
+    date_math,
+]
 
 
 async def init_agent() -> None:
-    """Fetch tool definitions from the Notion MCP server. Call once at startup."""
+    """Load tool definitions. Call once at startup."""
     global _tools, _tools_by_name, _tool_defs
-
-    provider = os.environ.get("LLM_PROVIDER", "ollama")
-
-    if provider == "groq":
-        # Groq can handle the full MCP tool set
-        client = _make_mcp_client()
-        notion_mcp_tools = await client.get_tools()
-        _tools = _SIMPLE_TOOLS + notion_mcp_tools
-    else:
-        # Smaller local models choke on 20+ tool defs — only expose simple tools
-        _tools = list(_SIMPLE_TOOLS)
-
-    _tools_by_name = {t.name: t for t in _tools}
-
-    _tool_defs = [convert_to_openai_tool(t) for t in _tools]
-    for td in _tool_defs:
-        _relax_array_item_types(td)
-
-    log.info("Loaded %d tools: %s", len(_tools), list(_tools_by_name.keys()))
+    _tools, _tools_by_name, _tool_defs = await load_tools(_SIMPLE_TOOLS)
 
 
-def _create_llm():
-    """Create the LLM instance based on the configured provider."""
-    provider = os.environ.get("LLM_PROVIDER", "ollama")
-    if provider == "groq":
-        model = os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
-        return ChatGroq(model=model, temperature=0)
-    model = os.environ.get("OLLAMA_MODEL", "qwen2.5:7b")
-    return ChatOllama(model=model, temperature=0)
+async def _ensure_initialized() -> None:
+    if _tools is None or _tools_by_name is None or _tool_defs is None:
+        await init_agent()
+
+
+# ---------------------------------------------------------------------------
+# Message building
+# ---------------------------------------------------------------------------
+
+def _estimate_tokens(text: str) -> int:
+    """Rough token estimate: ~4 chars per token for English text."""
+    return len(text) // 4
 
 
 def _build_messages(user_message: str, user_id: str) -> list[BaseMessage]:
     """Build the initial message list with system prompt, history, and user message."""
-    messages: list[BaseMessage] = [SystemMessage(content=_build_system_prompt(user_id))]
+    system_prompt = _build_system_prompt(user_id)
+    messages: list[BaseMessage] = [SystemMessage(content=system_prompt)]
+
+    used_tokens = _estimate_tokens(system_prompt) + _estimate_tokens(user_message) + 512
+    budget = cfg.max_history_tokens
 
     if user_id:
-        for msg in get_history(user_id):
+        history = get_history(user_id)
+        selected: list[BaseMessage] = []
+        for msg in reversed(history):
+            msg_tokens = _estimate_tokens(msg["content"])
+            if used_tokens + msg_tokens > budget:
+                break
+            used_tokens += msg_tokens
             if msg["role"] == "user":
-                messages.append(HumanMessage(content=msg["content"]))
+                selected.append(HumanMessage(content=msg["content"]))
             elif msg["role"] == "assistant":
-                messages.append(AIMessage(content=msg["content"]))
+                selected.append(AIMessage(content=msg["content"]))
+
+        selected.reverse()
+        messages.extend(selected)
+        log.debug(
+            "History: %d/%d messages fit within %d token budget (%d used)",
+            len(selected), len(history), budget, used_tokens,
+        )
         save_message(user_id, "user", user_message)
 
     messages.append(HumanMessage(content=user_message))
     return messages
 
 
-async def _invoke_tool(tc: ToolCall) -> tuple[str, str | None]:
-    """Invoke a single tool call. Returns (result_str, error_or_none)."""
-    assert _tools_by_name is not None
-    tool_fn = _tools_by_name.get(tc["name"])
-    if not tool_fn:
-        log.warning("Unknown tool requested: %s", tc["name"])
-        return f"Unknown tool: {tc['name']}", None
+# ---------------------------------------------------------------------------
+# Fake-action detection
+# ---------------------------------------------------------------------------
 
-    fixed_args = _fix_args(tc["args"])
-    log.info("Calling tool %s with args %s", tc["name"], fixed_args)
-    try:
-        result = await tool_fn.ainvoke(fixed_args)
-        log.debug("Tool %s returned %d chars", tc["name"], len(str(result)))
-        return str(result), None
-    except Exception as exc:
-        log.exception("Tool %s raised an error", tc["name"])
-        return f"Tool error for {tc['name']}: {exc}", None
+_ACTION_WORDS = re.compile(
+    r"\b(created|added|appended|updated|modified|searched|deleted|removed|wrote)\b",
+    re.IGNORECASE,
+)
+
+_NUDGE_MESSAGE = (
+    "You did NOT actually call any tools. You MUST use the "
+    "appropriate tool to perform the action. Do not describe "
+    "what you would do — actually call the tool now."
+)
 
 
-def _check_repeated_error(result_str: str, last_error: str | None) -> tuple[str, str | None]:
-    """Detect repeated errors and nudge the model. Returns (result_str, updated_last_error)."""
-    if "error" not in result_str.lower():
-        return result_str, last_error
-    if result_str == last_error:
-        log.warning("Repeated error detected, nudging model")
-        result_str += (
-            "\n\nYou already got this exact error. Do NOT retry the same "
-            "approach. Try different parameters, or explain to the user "
-            "what went wrong."
-        )
-    return result_str, result_str
+def _looks_like_faked_action(content: str) -> bool:
+    return bool(_ACTION_WORDS.search(content))
+
+
+def _should_retry_fake(reply: str, tools_called: bool, fake_retries: int) -> bool:
+    return (
+        not tools_called
+        and _looks_like_faked_action(reply)
+        and fake_retries < cfg.max_retries_on_fake
+    )
 
 
 def _save_reply(user_id: str, reply: str) -> None:
@@ -199,52 +144,63 @@ def _save_reply(user_id: str, reply: str) -> None:
         save_message(user_id, "assistant", reply)
 
 
-async def run_agent(user_message: str, user_id: str = "", max_iterations: int = 10) -> str:
-    if _tools is None or _tools_by_name is None or _tool_defs is None:
-        await init_agent()
+# ---------------------------------------------------------------------------
+# Debug helpers
+# ---------------------------------------------------------------------------
 
-    assert _tools is not None
-    assert _tools_by_name is not None
-    assert _tool_defs is not None
-
-    llm_with_tools = _create_llm().bind_tools(_tool_defs)
-    messages = _build_messages(user_message, user_id)
-
+def _log_message_chain(messages: list[BaseMessage]) -> None:
+    if not log.isEnabledFor(logging.DEBUG):
+        return
     log.debug("Message chain (%d messages):", len(messages))
     for i, m in enumerate(messages):
         log.debug("  [%d] %s: %s", i, type(m).__name__, str(m.content)[:200])
 
+
+# ---------------------------------------------------------------------------
+# Main agent loop
+# ---------------------------------------------------------------------------
+
+async def run_agent(user_message: str, user_id: str = "", max_iterations: int = 0) -> str:
+    if max_iterations <= 0:
+        max_iterations = cfg.max_iterations
+
+    await _ensure_initialized()
+    assert _tools_by_name is not None
+    assert _tool_defs is not None
+
+    llm_with_tools = create_llm().bind_tools(_tool_defs)
+    messages = _build_messages(user_message, user_id)
+    _log_message_chain(messages)
+
     last_error: str | None = None
     tools_called = False
+    fake_retries = 0
     for iteration in range(max_iterations):
-        try:
-            response = await llm_with_tools.ainvoke(messages)
-        except groq.RateLimitError as exc:
-            log.warning("Groq rate limit hit: %s", exc)
-            return (
-                "I'm temporarily rate-limited by the AI provider. "
-                "Please try again in a few minutes."
-            )
+        response = await invoke_llm(llm_with_tools, messages)
+        if response is None:
+            return "I'm temporarily rate-limited by the AI provider. Please try again in a few minutes."
         messages.append(response)
 
-        if not response.tool_calls:
-            log.info("Agent finished after %d iteration(s) with no tool calls", iteration + 1)
-            log.debug("Response content: %s", str(response.content)[:500])
-            reply = str(response.content) if response.content else "Done."
-            # Only save to history if the model actually used tools, or if
-            # this was a simple conversational reply (iteration 0, no action needed).
-            # Skip saving when the model claims it did something but never called tools.
-            if tools_called or iteration == 0:
-                _save_reply(user_id, reply)
-            else:
-                log.warning("Not saving reply — model claimed action without calling tools")
-            return reply
+        if response.tool_calls:
+            tools_called = True
+            last_error = await process_tool_calls(
+                response.tool_calls, messages, last_error, _tools_by_name,
+            )
+            continue
 
-        tools_called = True
-        for tc in response.tool_calls:
-            result_str, _ = await _invoke_tool(tc)
-            result_str, last_error = _check_repeated_error(result_str, last_error)
-            messages.append(ToolMessage(content=result_str, tool_call_id=tc["id"]))
+        reply = str(response.content) if response.content else "Done."
+
+        if _should_retry_fake(reply, tools_called, fake_retries):
+            fake_retries += 1
+            log.warning("Faked action detected (retry %d/%d), nudging", fake_retries, cfg.max_retries_on_fake)
+            messages.pop()
+            messages.append(HumanMessage(content=_NUDGE_MESSAGE))
+            continue
+
+        log.info("Agent finished after %d iteration(s)", iteration + 1)
+        if not _looks_like_faked_action(reply) or tools_called:
+            _save_reply(user_id, reply)
+        return reply
 
     log.warning("Agent hit max iterations (%d)", max_iterations)
     fallback = "I've completed all the steps I could. Check Notion for any created content."
