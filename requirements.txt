@@ -1,0 +1,9 @@
+discord.py>=2.7,<3
+langchain-core>=1.2,<2
+langchain-ollama>=1.1,<2
+langchain-groq>=1.1,<2
+langchain-mcp-adapters>=0.2,<1
+mcp>=1.27,<2
+notion-client>=3,<4
+requests>=2.31,<3
+python-dotenv>=1,<2

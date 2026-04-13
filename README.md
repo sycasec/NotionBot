@@ -16,13 +16,14 @@ A Discord bot that interacts with Notion, looks up stock prices, checks the weat
 ### 1. Clone and install dependencies
 
 ```bash
+git clone https://github.com/sycasec/NotionBot.git
+cd NotionBot
 python -m venv discord-bot-venv
 source discord-bot-venv/bin/activate
-pip install discord.py langchain-core langchain-ollama langchain-groq langchain-mcp-adapters \
-    notion-client requests python-dotenv mcp httpx
+pip install -r requirements.txt
 ```
 
-Node 22 is managed via mise (`mise install`).
+Node 22 is needed for the Notion MCP server and is managed via mise (`mise install`).
 
 ### 2. Pull the Ollama model
 
