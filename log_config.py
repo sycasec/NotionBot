@@ -15,8 +15,10 @@ def setup_logging() -> None:
     Set LOG_LEVEL env var to DEBUG, INFO, WARNING, ERROR, or CRITICAL.
     Defaults to INFO.
     """
-    level_name = os.environ.get("LOG_LEVEL", "INFO").upper()
-    level = getattr(logging, level_name, logging.INFO)
+    # Import here to avoid circular dependency (config imports os, not logging)
+    from config import cfg
+
+    level = getattr(logging, cfg.log_level, logging.INFO)
 
     formatter = _Formatter(
         fmt="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
