@@ -4,10 +4,11 @@ import sqlite3
 import zoneinfo
 from pathlib import Path
 
+from config import cfg
+
 log = logging.getLogger(__name__)
 
 _DB_PATH = Path(__file__).parent / "user_state.db"
-_MAX_HISTORY = 20  # max message pairs kept per user
 
 
 def _get_conn() -> sqlite3.Connection:
@@ -59,12 +60,14 @@ def save_message(
         conn.close()
 
 
-def get_history(user_id: str, limit: int = _MAX_HISTORY) -> list[dict]:
+def get_history(user_id: str, limit: int = 0) -> list[dict]:
     """Return recent conversation messages for a user.
 
     Each dict has keys: role, content, tool_calls (optional).
     Ordered oldest-first.
     """
+    if limit <= 0:
+        limit = cfg.max_history_messages
     conn = _get_conn()
     try:
         rows = conn.execute(
@@ -104,7 +107,7 @@ def clear_history(user_id: str) -> None:
 
 
 def _trim_history(conn: sqlite3.Connection, user_id: str) -> None:
-    """Keep only the most recent _MAX_HISTORY messages per user."""
+    """Keep only the most recent messages per user."""
     conn.execute(
         """
         DELETE FROM conversation_history
@@ -115,7 +118,7 @@ def _trim_history(conn: sqlite3.Connection, user_id: str) -> None:
             LIMIT ?
         )
         """,
-        (user_id, user_id, _MAX_HISTORY),
+        (user_id, user_id, cfg.max_history_messages),
     )
     conn.commit()
 
@@ -127,7 +130,7 @@ def get_timezone(user_id: str) -> str:
         row = conn.execute(
             "SELECT timezone FROM user_preferences WHERE user_id = ?", (user_id,)
         ).fetchone()
-        return row[0] if row else "Asia/Manila"
+        return row[0] if row else cfg.default_timezone
     finally:
         conn.close()
 
