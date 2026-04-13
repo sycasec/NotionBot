@@ -9,35 +9,39 @@ from config import cfg
 log = logging.getLogger(__name__)
 
 _DB_PATH = Path(__file__).parent / "user_state.db"
+_initialized = False
 
 
 def _get_conn() -> sqlite3.Connection:
+    global _initialized
     conn = sqlite3.connect(_DB_PATH)
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS conversation_history (
-            id         INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id    TEXT NOT NULL,
-            role       TEXT NOT NULL,
-            content    TEXT NOT NULL,
-            tool_calls TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    if not _initialized:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS conversation_history (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id    TEXT NOT NULL,
+                role       TEXT NOT NULL,
+                content    TEXT NOT NULL,
+                tool_calls TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """
         )
-        """
-    )
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_history_user ON conversation_history(user_id)"
-    )
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS user_preferences (
-            user_id  TEXT PRIMARY KEY,
-            timezone TEXT NOT NULL DEFAULT 'Asia/Manila'
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_history_user ON conversation_history(user_id)"
         )
-        """
-    )
-    conn.commit()
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS user_preferences (
+                user_id  TEXT PRIMARY KEY,
+                timezone TEXT NOT NULL DEFAULT 'Asia/Manila'
+            )
+            """
+        )
+        conn.commit()
+        _initialized = True
     return conn
 
 

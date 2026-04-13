@@ -1,4 +1,6 @@
+import calendar
 import logging
+import re
 from datetime import datetime, timedelta
 
 from langchain_core.tools import tool
@@ -23,7 +25,6 @@ def date_math(expression: str) -> str:
             return f"Today is {today.strftime('%A, %B %d, %Y')}."
 
         # Parse "today +/- N unit"
-        import re
         match = re.match(r"today\s*([+-])\s*(\d+)\s*(days?|weeks?|months?|years?)", expr)
         if not match:
             return (
@@ -41,7 +42,6 @@ def date_math(expression: str) -> str:
         elif unit == "week":
             result = today + timedelta(weeks=amount)
         elif unit == "month":
-            # Approximate: 30 days per month
             month = today.month + amount
             year = today.year + (month - 1) // 12
             month = (month - 1) % 12 + 1
@@ -67,5 +67,4 @@ def date_math(expression: str) -> str:
 
 def _days_in_month(year: int, month: int) -> int:
     """Return the number of days in a given month."""
-    import calendar
     return calendar.monthrange(year, month)[1]

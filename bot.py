@@ -112,7 +112,6 @@ async def on_ready() -> None:
     log.info("Ready. Mention me or DM me to get started.")
 
 
-@bot.event
 async def _handle_text_command(message: discord.Message, content: str) -> bool:
     """Handle built-in text commands. Returns True if a command was handled."""
     user_id = str(message.author.id)
@@ -151,15 +150,7 @@ async def _run_and_reply(message: discord.Message, content: str) -> None:
             error_type = type(exc).__name__
             response = f"Something went wrong (`{error_type}`). Please try again or rephrase your request."
 
-    if len(response) <= 2000:
-        await message.reply(response)
-    else:
-        chunks = [response[i : i + 1990] for i in range(0, len(response), 1990)]
-        for i, chunk in enumerate(chunks):
-            if i == 0:
-                await message.reply(chunk)
-            else:
-                await message.channel.send(chunk)
+    await _send_chunks(message.reply, response)
 
 
 @bot.event

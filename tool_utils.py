@@ -41,22 +41,22 @@ def fix_args(args: dict) -> dict:
 
 async def invoke_tool(
     tc: ToolCall, tools_by_name: dict[str, BaseTool],
-) -> tuple[str, str | None]:
-    """Invoke a single tool call. Returns (result_str, error_or_none)."""
+) -> str:
+    """Invoke a single tool call. Returns the result string."""
     tool_fn = tools_by_name.get(tc["name"])
     if not tool_fn:
         log.warning("Unknown tool requested: %s", tc["name"])
-        return f"Unknown tool: {tc['name']}", None
+        return f"Unknown tool: {tc['name']}"
 
     fixed_args = fix_args(tc["args"])
     log.info("Calling tool %s with args %s", tc["name"], fixed_args)
     try:
         result = await tool_fn.ainvoke(fixed_args)
         log.debug("Tool %s returned %d chars", tc["name"], len(str(result)))
-        return str(result), None
+        return str(result)
     except Exception as exc:
         log.exception("Tool %s raised an error", tc["name"])
-        return f"Tool error for {tc['name']}: {exc}", None
+        return f"Tool error for {tc['name']}: {exc}"
 
 
 def check_repeated_error(
@@ -83,7 +83,7 @@ async def process_tool_calls(
 ) -> str | None:
     """Execute tool calls and append results to messages. Returns updated last_error."""
     for tc in tool_calls:
-        result_str, _ = await invoke_tool(tc, tools_by_name)
+        result_str = await invoke_tool(tc, tools_by_name)
         result_str, last_error = check_repeated_error(result_str, last_error)
         messages.append(ToolMessage(content=result_str, tool_call_id=tc["id"]))
     return last_error

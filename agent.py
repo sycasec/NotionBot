@@ -1,5 +1,6 @@
 import logging
 import re
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -43,9 +44,14 @@ def _build_system_prompt(user_id: str = "") -> str:
 # Tool registry
 # ---------------------------------------------------------------------------
 
-_tools: list[BaseTool] | None = None
-_tools_by_name: dict[str, BaseTool] | None = None
-_tool_defs: list[dict[str, Any]] | None = None
+@dataclass
+class _ToolRegistry:
+    tools: list[BaseTool] = field(default_factory=list)
+    by_name: dict[str, BaseTool] = field(default_factory=dict)
+    defs: list[dict[str, Any]] = field(default_factory=list)
+    loaded: bool = False
+
+_registry = _ToolRegistry()
 
 _SIMPLE_TOOLS = [
     create_notion_page,
@@ -60,12 +66,15 @@ _SIMPLE_TOOLS = [
 
 async def init_agent() -> None:
     """Load tool definitions. Call once at startup."""
-    global _tools, _tools_by_name, _tool_defs
-    _tools, _tools_by_name, _tool_defs = await load_tools(_SIMPLE_TOOLS)
+    tools, by_name, defs = await load_tools(_SIMPLE_TOOLS)
+    _registry.tools = tools
+    _registry.by_name = by_name
+    _registry.defs = defs
+    _registry.loaded = True
 
 
 async def _ensure_initialized() -> None:
-    if _tools is None or _tools_by_name is None or _tool_defs is None:
+    if not _registry.loaded:
         await init_agent()
 
 
@@ -165,10 +174,8 @@ async def run_agent(user_message: str, user_id: str = "", max_iterations: int = 
         max_iterations = cfg.max_iterations
 
     await _ensure_initialized()
-    assert _tools_by_name is not None
-    assert _tool_defs is not None
 
-    llm_with_tools = create_llm().bind_tools(_tool_defs)
+    llm_with_tools = create_llm().bind_tools(_registry.defs)
     messages = _build_messages(user_message, user_id)
     _log_message_chain(messages)
 
@@ -184,7 +191,7 @@ async def run_agent(user_message: str, user_id: str = "", max_iterations: int = 
         if response.tool_calls:
             tools_called = True
             last_error = await process_tool_calls(
-                response.tool_calls, messages, last_error, _tools_by_name,
+                response.tool_calls, messages, last_error, _registry.by_name,
             )
             continue
 

@@ -4,7 +4,7 @@ import os
 from typing import Any
 
 import groq
-from langchain_core.messages import BaseMessage
+from langchain_core.messages import AIMessage, BaseMessage
 from langchain_core.tools import BaseTool
 from langchain_core.utils.function_calling import convert_to_openai_tool
 from langchain_groq import ChatGroq
@@ -46,7 +46,7 @@ def _relax_array_item_types(obj: dict | list) -> None:
                 _relax_array_item_types(item)
 
 
-def create_llm():
+def create_llm() -> ChatGroq | ChatOllama:
     """Create the LLM instance based on the configured provider."""
     if cfg.llm_provider == "groq":
         return ChatGroq(model=cfg.groq_model, temperature=cfg.groq_temperature)
@@ -74,7 +74,7 @@ async def load_tools(simple_tools: list[BaseTool]) -> tuple[
     return tools, tools_by_name, tool_defs
 
 
-async def invoke_llm(llm_with_tools, messages: list[BaseMessage]):
+async def invoke_llm(llm_with_tools, messages: list[BaseMessage]) -> AIMessage | None:
     """Invoke the LLM, returning None on rate limit."""
     try:
         return await llm_with_tools.ainvoke(messages)
