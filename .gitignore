@@ -1,0 +1,4 @@
+.env
+__pycache__/
+discord-bot-venv/
+user_state.db
